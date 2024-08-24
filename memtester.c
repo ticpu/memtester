@@ -57,6 +57,16 @@ struct test tests[] = {
     { NULL, NULL }
 };
 
+typedef struct memory_alloc {
+	volatile void *buf;
+	volatile void *aligned;
+	size_t wantbytes;
+	int bufsize;
+	int do_mlock;
+	const size_t pagesize;
+	const ptrdiff_t pagesizemask;
+} memory_alloc_t;
+
 /* Sanity checks and portability helper macros. */
 #ifdef _SC_VERSION
 void check_posix_system(void) {
@@ -108,15 +118,75 @@ int usage(char *me) {
     return EXIT_FAIL_NONSTARTER;
 }
 
+int alloc_using_malloc(memory_alloc_t *alloc, const size_t wantbytes_orig) {
+    while (!alloc->buf && alloc->wantbytes) {
+        alloc->buf = (void volatile *) malloc(alloc->wantbytes);
+        if (!alloc->buf) alloc->wantbytes -= alloc->pagesize;
+    }
+    alloc->bufsize = alloc->wantbytes;
+    printf("got  %lluMB (%llu bytes)", (ull) alloc->wantbytes >> 20,
+        (ull) alloc->wantbytes);
+    fflush(stdout);
+    if (alloc->do_mlock) {
+        printf(", trying mlock ...");
+        fflush(stdout);
+        if ((size_t) alloc->buf % alloc->pagesize) {
+            /* printf("aligning to page -- was 0x%tx\n", buf); */
+            alloc->aligned = (void volatile *) ((size_t) alloc->buf &
+                    alloc->pagesizemask) + alloc->pagesize;
+            /* printf("  now 0x%tx -- lost %d bytes\n", aligned,
+             *      (size_t) aligned - (size_t) buf);
+             */
+            alloc->bufsize -= ((size_t) alloc->aligned - (size_t) alloc->buf);
+        } else {
+            alloc->aligned = alloc->buf;
+        }
+        /* Try mlock */
+        if (mlock((void *) alloc->aligned, alloc->bufsize) < 0) {
+            switch(errno) {
+                case EAGAIN: /* BSDs */
+                    printf("over system/pre-process limit, reducing...\n");
+                    free((void *) alloc->buf);
+                    alloc->buf = NULL;
+                    alloc->wantbytes -= alloc->pagesize;
+                    break;
+                case ENOMEM:
+                    printf("too many pages, reducing...\n");
+                    free((void *) alloc->buf);
+                    alloc->buf = NULL;
+                    alloc->wantbytes -= alloc->pagesize;
+                    break;
+                case EPERM:
+                    printf("insufficient permission.\n");
+                    printf("Trying again, unlocked:\n");
+                    alloc->do_mlock = 0;
+                    free((void *) alloc->buf);
+                    alloc->buf = NULL;
+                    alloc->wantbytes = wantbytes_orig;
+                    break;
+                default:
+                    printf("failed for unknown reason.\n");
+                    alloc->do_mlock = 0;
+                    return 1;
+            }
+        } else {
+            printf("locked.\n");
+            return 1;
+        }
+    } else {
+        printf("\n");
+        return 1;
+    }
+
+    return 0;
+}
+
 int main(int argc, char **argv) {
     ul loops, loop, i;
-    size_t pagesize, wantraw, wantmb, wantbytes, wantbytes_orig, bufsize,
-         halflen, count;
+    size_t wantraw, wantmb, wantbytes_orig, halflen, count;
     char *memsuffix, *addrsuffix, *loopsuffix;
-    ptrdiff_t pagesizemask;
-    void volatile *buf, *aligned;
     ulv *bufa, *bufb;
-    int do_mlock = 1, done_mem = 0;
+    int done_mem = 0;
     int exit_code = 0;
     int memfd, opt, memshift;
     size_t maxbytes = -1; /* addressable memory, in bytes */
@@ -128,6 +198,15 @@ int main(int argc, char **argv) {
     char *env_testmask = 0;
     ul testmask = 0;
     int o_flags = O_RDWR | O_SYNC;
+    memory_alloc_t alloc = {
+            .buf = NULL,
+            .aligned = NULL,
+            .wantbytes = 0,
+            .bufsize = 0,
+            .pagesize =	memtester_pagesize(),
+            .pagesizemask = (ptrdiff_t) ~(memtester_pagesize() - 1),
+            .do_mlock = 1,
+    };
 
     out_initialize();
 
@@ -136,9 +215,7 @@ int main(int argc, char **argv) {
     printf("Licensed under the GNU General Public License version 2 (only).\n");
     printf("\n");
     check_posix_system();
-    pagesize = memtester_pagesize();
-    pagesizemask = (ptrdiff_t) ~(pagesize - 1);
-    printf("pagesizemask is 0x%tx\n", pagesizemask);
+    printf("pagesizemask is 0x%tx\n", alloc.pagesizemask);
 
     /* If MEMTESTER_TEST_MASK is set, we use its value as a mask of which
        tests we run.
@@ -172,7 +249,7 @@ int main(int argc, char **argv) {
                             "address (0x123...)\n");
                     return usage(argv[0]);
                 }
-                if (physaddrbase & (pagesize - 1)) {
+                if (physaddrbase & (alloc.pagesize - 1)) {
                     fprintf(stderr,
                             "bad physaddrbase arg; does not start on page "
                             "boundary\n");
@@ -245,16 +322,16 @@ int main(int argc, char **argv) {
         default:  /* bad suffix */
             return usage(argv[0]);
     }
-    wantbytes_orig = wantbytes = ((size_t) wantraw << memshift);
+    wantbytes_orig = alloc.wantbytes = ((size_t) wantraw << memshift);
     wantmb = (wantbytes_orig >> 20);
     optind++;
     if (wantmb > maxmb) {
         fprintf(stderr, "This system can only address %llu MB.\n", (ull) maxmb);
         exit(EXIT_FAIL_NONSTARTER);
     }
-    if (wantbytes < pagesize) {
+    if (alloc.wantbytes < alloc.pagesize) {
         fprintf(stderr, "bytes %ld < pagesize %ld -- memory argument too large?\n",
-                wantbytes, pagesize);
+                alloc.wantbytes, alloc.pagesize);
         exit(EXIT_FAIL_NONSTARTER);
     }
 
@@ -273,8 +350,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    printf("want %lluMB (%llu bytes)\n", (ull) wantmb, (ull) wantbytes);
-    buf = NULL;
+    printf("want %lluMB (%llu bytes)\n", (ull) wantmb, (ull) alloc.wantbytes);
+    alloc.buf = NULL;
 
     if (use_phys) {
         memfd = open(device_name, o_flags);
@@ -283,105 +360,50 @@ int main(int argc, char **argv) {
                     device_name, strerror(errno));
             exit(EXIT_FAIL_NONSTARTER);
         }
-        buf = (void volatile *) mmap(0, wantbytes, PROT_READ | PROT_WRITE,
+        alloc.buf = (void volatile *) mmap(0, alloc.wantbytes, PROT_READ | PROT_WRITE,
                                      MAP_SHARED | MAP_LOCKED, memfd,
                                      physaddrbase);
-        if (buf == MAP_FAILED) {
+        if (alloc.buf == MAP_FAILED) {
             fprintf(stderr, "failed to mmap %s for physical memory: %s\n",
                     device_name, strerror(errno));
             exit(EXIT_FAIL_NONSTARTER);
         }
 
-        if (mlock((void *) buf, wantbytes) < 0) {
+        if (mlock((void *) alloc.buf, alloc.wantbytes) < 0) {
             fprintf(stderr, "failed to mlock mmap'ed space\n");
-            do_mlock = 0;
+            alloc.do_mlock = 0;
         }
 
-        bufsize = wantbytes; /* accept no less */
-        aligned = buf;
+        alloc.bufsize = alloc.wantbytes; /* accept no less */
+        alloc.aligned = alloc.buf;
         done_mem = 1;
     }
 
     while (!done_mem) {
-        while (!buf && wantbytes) {
-            buf = (void volatile *) malloc(wantbytes);
-            if (!buf) wantbytes -= pagesize;
-        }
-        bufsize = wantbytes;
-        printf("got  %lluMB (%llu bytes)", (ull) wantbytes >> 20,
-            (ull) wantbytes);
-        fflush(stdout);
-        if (do_mlock) {
-            printf(", trying mlock ...");
-            fflush(stdout);
-            if ((size_t) buf % pagesize) {
-                /* printf("aligning to page -- was 0x%tx\n", buf); */
-                aligned = (void volatile *) ((size_t) buf & pagesizemask) + pagesize;
-                /* printf("  now 0x%tx -- lost %d bytes\n", aligned,
-                 *      (size_t) aligned - (size_t) buf);
-                 */
-                bufsize -= ((size_t) aligned - (size_t) buf);
-            } else {
-                aligned = buf;
-            }
-            /* Try mlock */
-            if (mlock((void *) aligned, bufsize) < 0) {
-                switch(errno) {
-                    case EAGAIN: /* BSDs */
-                        printf("over system/pre-process limit, reducing...\n");
-                        free((void *) buf);
-                        buf = NULL;
-                        wantbytes -= pagesize;
-                        break;
-                    case ENOMEM:
-                        printf("too many pages, reducing...\n");
-                        free((void *) buf);
-                        buf = NULL;
-                        wantbytes -= pagesize;
-                        break;
-                    case EPERM:
-                        printf("insufficient permission.\n");
-                        printf("Trying again, unlocked:\n");
-                        do_mlock = 0;
-                        free((void *) buf);
-                        buf = NULL;
-                        wantbytes = wantbytes_orig;
-                        break;
-                    default:
-                        printf("failed for unknown reason.\n");
-                        do_mlock = 0;
-                        done_mem = 1;
-                }
-            } else {
-                printf("locked.\n");
-                done_mem = 1;
-            }
-        } else {
-            done_mem = 1;
-            printf("\n");
-        }
+        done_mem = alloc_using_malloc(&alloc, wantbytes_orig);
     }
 
-    if (!do_mlock) fprintf(stderr, "Continuing with unlocked memory; testing "
+    if (!alloc.do_mlock) fprintf(stderr, "Continuing with unlocked memory; testing "
                            "will be slower and less reliable.\n");
 
     /* Do alighnment here as well, as some cases won't trigger above if you
        define out the use of mlock() (cough HP/UX 10 cough). */
-    if ((size_t) buf % pagesize) {
+    if ((size_t) alloc.buf % alloc.pagesize) {
         /* printf("aligning to page -- was 0x%tx\n", buf); */
-        aligned = (void volatile *) ((size_t) buf & pagesizemask) + pagesize;
+        alloc.aligned = (void volatile *) ((size_t) alloc.buf
+                & alloc.pagesizemask) + alloc.pagesize;
         /* printf("  now 0x%tx -- lost %d bytes\n", aligned,
          *      (size_t) aligned - (size_t) buf);
          */
-        bufsize -= ((size_t) aligned - (size_t) buf);
+        alloc.bufsize -= ((size_t) alloc.aligned - (size_t) alloc.buf);
     } else {
-        aligned = buf;
+        alloc.aligned = alloc.buf;
     }
 
-    halflen = bufsize / 2;
+    halflen = alloc.bufsize / 2;
     count = halflen / sizeof(ul);
-    bufa = (ulv *) aligned;
-    bufb = (ulv *) ((size_t) aligned + halflen);
+    bufa = (ulv *) alloc.aligned;
+    bufb = (ulv *) ((size_t) alloc.aligned + halflen);
 
     for(loop=1; ((!loops) || loop <= loops); loop++) {
         printf("Loop %lu", loop);
@@ -391,7 +413,7 @@ int main(int argc, char **argv) {
         printf(":\n");
         printf("  %-20s: ", "Stuck Address");
         fflush(stdout);
-        if (!test_stuck_address(aligned, bufsize / sizeof(ul))) {
+        if (!test_stuck_address(alloc.aligned, alloc.bufsize / sizeof(ul))) {
              printf("ok\n");
         } else {
             exit_code |= EXIT_FAIL_ADDRESSLINES;
@@ -413,12 +435,12 @@ int main(int argc, char **argv) {
             }
             fflush(stdout);
             /* clear buffer */
-            memset((void *) buf, 255, wantbytes);
+            memset((void *) alloc.buf, 255, alloc.wantbytes);
         }
         printf("\n");
         fflush(stdout);
     }
-    if (do_mlock) munlock((void *) aligned, bufsize);
+    if (alloc.do_mlock) munlock((void *) alloc.aligned, alloc.bufsize);
     printf("Done.\n");
     fflush(stdout);
     exit(exit_code);
