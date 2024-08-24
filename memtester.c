@@ -58,13 +58,14 @@ struct test tests[] = {
 };
 
 typedef struct memory_alloc {
-	volatile void *buf;
-	volatile void *aligned;
-	size_t wantbytes;
-	int bufsize;
-	int do_mlock;
-	const size_t pagesize;
-	const ptrdiff_t pagesizemask;
+    volatile void *buf;
+    volatile void *aligned;
+    size_t wantbytes;
+    int bufsize;
+    int do_mlock;
+    int use_hugepages;
+    size_t pagesize;
+    ptrdiff_t pagesizemask;
 } memory_alloc_t;
 
 /* Sanity checks and portability helper macros. */
@@ -81,19 +82,21 @@ void check_posix_system(void) {
 #endif
 
 #ifdef _SC_PAGE_SIZE
-int memtester_pagesize(void) {
-    int pagesize = sysconf(_SC_PAGE_SIZE);
+void memtester_pagesize(memory_alloc_t *alloc) {
+    size_t pagesize = sysconf(_SC_PAGE_SIZE);
     if (pagesize == -1) {
         perror("get page size failed");
         exit(EXIT_FAIL_NONSTARTER);
     }
     printf("pagesize is %ld\n", (long) pagesize);
-    return pagesize;
+    alloc->pagesize = pagesize;
+    alloc->pagesizemask = (ptrdiff_t) ~(pagesize - 1);
 }
 #else
-int memtester_pagesize(void) {
+int memtester_pagesize(memory_alloc_t *alloc) {
     printf("sysconf(_SC_PAGE_SIZE) not supported; using pagesize of 8192\n");
-    return 8192;
+    alloc->pagesize = 8192;
+    alloc->pagesizemask = (ptrdiff_t) ~(alloc->pagesize - 1);
 }
 #endif
 
@@ -195,7 +198,7 @@ int main(int argc, char **argv) {
     char *device_name = "/dev/mem";
     struct stat statbuf;
     int device_specified = 0;
-    char *env_testmask = 0;
+    char *env_testmask;
     ul testmask = 0;
     int o_flags = O_RDWR | O_SYNC;
     memory_alloc_t alloc = {
@@ -203,11 +206,11 @@ int main(int argc, char **argv) {
             .aligned = NULL,
             .wantbytes = 0,
             .bufsize = 0,
-            .pagesize =	memtester_pagesize(),
-            .pagesizemask = (ptrdiff_t) ~(memtester_pagesize() - 1),
+            .use_hugepages = 0,
             .do_mlock = 1,
     };
 
+    memtester_pagesize(&alloc);
     out_initialize();
 
     printf("memtester version " __version__ " (%d-bit)\n", UL_LEN);
