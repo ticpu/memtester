@@ -94,18 +94,18 @@ int memtester_pagesize(void) {
 #endif
 
 /* Function declarations */
-void usage(char *me);
+int usage(char *me);
 
 /* Global vars - so tests have access to this information */
 int use_phys = 0;
 off_t physaddrbase = 0;
 
 /* Function definitions */
-void usage(char *me) {
+int usage(char *me) {
     fprintf(stderr, "\n"
             "Usage: %s [-p physaddrbase [-d device] [-u]] <mem>[B|K|M|G] [loops]\n",
             me);
-    exit(EXIT_FAIL_NONSTARTER);
+    return EXIT_FAIL_NONSTARTER;
 }
 
 int main(int argc, char **argv) {
@@ -143,13 +143,13 @@ int main(int argc, char **argv) {
     /* If MEMTESTER_TEST_MASK is set, we use its value as a mask of which
        tests we run.
      */
-    if (env_testmask = getenv("MEMTESTER_TEST_MASK")) {
+    if ((env_testmask = getenv("MEMTESTER_TEST_MASK"))) {
         errno = 0;
         testmask = strtoul(env_testmask, 0, 0);
         if (errno) {
             fprintf(stderr, "error parsing MEMTESTER_TEST_MASK %s: %s\n",
                     env_testmask, strerror(errno));
-            usage(argv[0]); /* doesn't return */
+            return usage(argv[0]);
         }
         printf("using testmask 0x%lx\n", testmask);
     }
@@ -163,20 +163,20 @@ int main(int argc, char **argv) {
                     fprintf(stderr,
                             "failed to parse physaddrbase arg; should be hex "
                             "address (0x123...)\n");
-                    usage(argv[0]); /* doesn't return */
+                    return usage(argv[0]);
                 }
                 if (*addrsuffix != '\0') {
                     /* got an invalid character in the address */
                     fprintf(stderr,
                             "failed to parse physaddrbase arg; should be hex "
                             "address (0x123...)\n");
-                    usage(argv[0]); /* doesn't return */
+                    return usage(argv[0]);
                 }
                 if (physaddrbase & (pagesize - 1)) {
                     fprintf(stderr,
                             "bad physaddrbase arg; does not start on page "
                             "boundary\n");
-                    usage(argv[0]); /* doesn't return */
+                    return usage(argv[0]);
                 }
                 /* okay, got address */
                 use_phys = 1;
@@ -185,12 +185,12 @@ int main(int argc, char **argv) {
                 if (stat(optarg,&statbuf)) {
                     fprintf(stderr, "can not use %s as device: %s\n", optarg,
                             strerror(errno));
-                    usage(argv[0]); /* doesn't return */
+                    return usage(argv[0]);
                 } else {
                     if (!S_ISCHR(statbuf.st_mode)) {
                         fprintf(stderr, "can not mmap non-char device %s\n",
                                 optarg);
-                        usage(argv[0]); /* doesn't return */
+                        return usage(argv[0]);
                     } else {
                         device_name = optarg;
                         device_specified = 1;
@@ -198,29 +198,29 @@ int main(int argc, char **argv) {
                 }
                 break;
             case 'u':
-		o_flags &= ~O_SYNC;
-		break;
+                o_flags &= ~O_SYNC;
+                break;
             default: /* '?' */
-                usage(argv[0]); /* doesn't return */
+                return usage(argv[0]);
         }
     }
 
     if (device_specified && !use_phys) {
         fprintf(stderr,
                 "for mem device, physaddrbase (-p) must be specified\n");
-        usage(argv[0]); /* doesn't return */
+        return usage(argv[0]);
     }
 
     if (optind >= argc) {
         fprintf(stderr, "need memory argument, in MB\n");
-        usage(argv[0]); /* doesn't return */
+        return usage(argv[0]);
     }
 
     errno = 0;
     wantraw = (size_t) strtoul(argv[optind], &memsuffix, 0);
     if (errno != 0) {
         fprintf(stderr, "failed to parse memory argument");
-        usage(argv[0]); /* doesn't return */
+        return usage(argv[0]);
     }
     switch (*memsuffix) {
         case 'G':
@@ -242,9 +242,8 @@ int main(int argc, char **argv) {
         case '\0':  /* no suffix */
             memshift = 20; /* megabytes */
             break;
-        default:
-            /* bad suffix */
-            usage(argv[0]); /* doesn't return */
+        default:  /* bad suffix */
+            return usage(argv[0]);
     }
     wantbytes_orig = wantbytes = ((size_t) wantraw << memshift);
     wantmb = (wantbytes_orig >> 20);
@@ -266,11 +265,11 @@ int main(int argc, char **argv) {
         loops = strtoul(argv[optind], &loopsuffix, 0);
         if (errno != 0) {
             fprintf(stderr, "failed to parse number of loops");
-            usage(argv[0]); /* doesn't return */
+            return usage(argv[0]);
         }
         if (*loopsuffix != '\0') {
             fprintf(stderr, "loop suffix %c\n", *loopsuffix);
-            usage(argv[0]); /* doesn't return */
+            return usage(argv[0]);
         }
     }
 
