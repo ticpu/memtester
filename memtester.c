@@ -84,9 +84,14 @@ void check_posix_system(void) {
 #ifdef _SC_PAGE_SIZE
 void memtester_pagesize(memory_alloc_t *alloc) {
     size_t pagesize = sysconf(_SC_PAGE_SIZE);
-    if (pagesize == -1) {
-        perror("get page size failed");
-        exit(EXIT_FAIL_NONSTARTER);
+    if (alloc->use_hugepages) {
+        pagesize = 2L * 1024 * 1024;
+    } else {
+        pagesize = sysconf(_SC_PAGE_SIZE);
+        if (pagesize == -1) {
+            perror("get page size failed");
+            exit(EXIT_FAIL_NONSTARTER);
+        }
     }
     printf("pagesize is %ld\n", (long) pagesize);
     alloc->pagesize = pagesize;
@@ -116,9 +121,64 @@ off_t physaddrbase = 0;
 /* Function definitions */
 int usage(char *me) {
     fprintf(stderr, "\n"
-            "Usage: %s [-p physaddrbase [-d device] [-u]] <mem>[B|K|M|G] [loops]\n",
+            "Usage: %s [-H] [-p physaddrbase [-d device] [-u]] <mem>[B|K|M|G] [loops]\n",
             me);
     return EXIT_FAIL_NONSTARTER;
+}
+
+long get_free_hugepages(void) {
+	FILE *file = fopen("/sys/kernel/mm/hugepages/hugepages-2048kB/free_hugepages", "r");
+	long free_hugepages = 0;
+
+	if (file == NULL) {
+		perror("Error opening file");
+		return -1;
+	}
+
+	if (fscanf(file, "%ld", &free_hugepages) != 1) {
+		perror("Error reading from file");
+		fclose(file);
+		return -1;
+	}
+
+	fclose(file);
+
+	return free_hugepages;
+}
+
+void alloc_using_hugepages(memory_alloc_t *alloc) {
+	long free_hugepages = get_free_hugepages();
+
+	if (alloc->wantbytes % alloc->pagesize != 0) {
+        alloc->wantbytes = ((alloc->wantbytes / alloc->pagesize) + 1) * alloc->pagesize;
+    }
+
+    while (!alloc->buf && alloc->wantbytes) {
+        alloc->buf = mmap(NULL, alloc->wantbytes, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+
+        if (alloc->buf == MAP_FAILED && errno == ENOMEM) {
+			alloc->buf = NULL;
+
+			if (free_hugepages > 0 && alloc->wantbytes > (free_hugepages * alloc->pagesize)) {
+				alloc->wantbytes = free_hugepages * alloc->pagesize;
+			} else {
+				alloc->wantbytes -= alloc->pagesize;
+			}
+
+            if (alloc->wantbytes < alloc->pagesize) {
+                fprintf(stderr, "insufficient memory available for huge page allocation\n");
+                break;
+            }
+        } else if (alloc->buf == MAP_FAILED) {
+			perror("mmap failed for huge pages, ");
+			exit(EXIT_FAILURE);
+		} else {
+			printf("got  %lluMB (%llu bytes)", (ull) alloc->wantbytes >> 20,
+				   (ull) alloc->wantbytes);
+		}
+    }
+	printf("\n");
 }
 
 int alloc_using_malloc(memory_alloc_t *alloc, const size_t wantbytes_orig) {
@@ -234,8 +294,12 @@ int main(int argc, char **argv) {
         printf("using testmask 0x%lx\n", testmask);
     }
 
-    while ((opt = getopt(argc, argv, "p:d:u")) != -1) {
+    while ((opt = getopt(argc, argv, "Hp:d:u")) != -1) {
         switch (opt) {
+            case 'H':
+                alloc.use_hugepages = 1;
+                memtester_pagesize(&alloc);
+                break;
             case 'p':
                 errno = 0;
                 physaddrbase = (off_t) strtoull(optarg, &addrsuffix, 16);
@@ -382,8 +446,12 @@ int main(int argc, char **argv) {
         done_mem = 1;
     }
 
-    while (!done_mem) {
-        done_mem = alloc_using_malloc(&alloc, wantbytes_orig);
+    if (alloc.use_hugepages) {
+        alloc_using_hugepages(&alloc);
+    } else {
+        while (!done_mem) {
+            done_mem = alloc_using_malloc(&alloc, wantbytes_orig);
+        }
     }
 
     if (!alloc.do_mlock) fprintf(stderr, "Continuing with unlocked memory; testing "

@@ -3,7 +3,7 @@
 memtester \- stress test to find memory subsystem faults.
 .SH SYNOPSIS
 .B memtester
-[\f -p PHYSADDR\fR [\f -d DEVICE\fR]]
+[\f -H\fR] [\f -p PHYSADDR\fR [\f -d DEVICE\fR]]
 <\fIMEMORY\fR>
 [\fIITERATIONS\fR]
 .SH DESCRIPTION
@@ -44,6 +44,9 @@ Linux), memtester or another process may be killed by the OOM killer.
 So choose wisely.
 .PP
 .SH OPTIONS
+.TP
+\f -H\fR
+tells memtester to use hugepages to allocate memory.
 .TP
 \f -p PHYSADDR\fR
 tells memtester to test a specific region of memory starting at physical 
